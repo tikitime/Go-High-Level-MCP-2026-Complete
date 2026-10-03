@@ -8,9 +8,10 @@
  * PUBLISH, and CLONE workflows with full action/trigger support.
  */
 
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
+import { execFileSync } from 'child_process';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -246,6 +247,26 @@ export class WorkflowBuilderClient {
    * Write a token back to the .env file (preserves other lines).
    */
   private persistToken(key: string, value: string): void {
+    // 1Password-backed persistence (preferred): keep the rotating refresh token
+    // canonical in 1P and off disk. GHL invalidates the old refresh token on every
+    // rotation, so without this the op:// value goes stale after a single use.
+    const opItem = process.env.GHL_REFRESH_TOKEN_OP_ITEM;
+    if (opItem && (key === 'GHL_REFRESH_TOKEN' || key === 'GHL_AUTH_REFRESH_TOKEN')) {
+      try {
+        const vault = process.env.GHL_REFRESH_TOKEN_OP_VAULT || 'Developer';
+        const hash = createHash('sha256').update(value).digest('hex').slice(0, 12);
+        const today = new Date().toISOString().slice(0, 10);
+        execFileSync('op', ['item', 'edit', opItem, '--vault', vault,
+          `credential[concealed]=${value}`,
+          `value_hash_prefix[text]=${hash}`,
+          `last_rotated_at[text]=${today}`,
+        ], { stdio: 'ignore', timeout: 20000 });
+      } catch (err) {
+        process.stderr.write(`[WorkflowBuilder] 1P token persist failed (in-memory token still valid this session): ${err}\n`);
+      }
+      return;
+    }
+
     const envPath = this.config.envFilePath;
     if (!envPath || !existsSync(envPath)) return;
 
